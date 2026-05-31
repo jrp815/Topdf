@@ -10,6 +10,10 @@ import streamlit as st
 import os
 import tempfile
 import io
+import subprocess
+import platform
+import urllib.request
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +32,115 @@ from docx import Document
 import openpyxl
 from PIL import Image
 
+# ============================================================
+# 中文字体自动安装与注册
+# Streamlit Cloud 是 Linux，默认无中文字体，需要自动下载安装
+# ============================================================
+
+# 字体缓存目录（项目内）
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+FONT_FILE = os.path.join(FONT_DIR, 'NotoSansSC-Regular.ttf')
+
+# Noto Sans SC Regular 字体下载地址（Google Fonts GitHub 仓库）
+FONT_URL = 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf'
+# 备用：Source Han Sans (思源黑体)
+FONT_URL_ALT = 'https://github.com/adobe-fonts/source-han-sans/raw/release/OTF/SimplifiedChinese/SourceHanSansSC-Regular.otf'
+
+
+def download_font(url, dest_path):
+    """下载字体文件"""
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    try:
+        urllib.request.urlretrieve(url, dest_path)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_chinese_font():
+    """确保中文字体可用，不存在则自动下载"""
+    # 如果字体文件已存在，直接返回
+    if os.path.exists(FONT_FILE) and os.path.getsize(FONT_FILE) > 100000:
+        return FONT_FILE
+
+    # 尝试系统字体
+    system = platform.system()
+    system_fonts = []
+    if system == 'Windows':
+        windir = os.environ.get('WINDIR', 'C:\\Windows')
+        for fname in ['msyh.ttc', 'simhei.ttf', 'simsun.ttc']:
+            system_fonts.append(os.path.join(windir, 'Fonts', fname))
+    elif system == 'Darwin':
+        system_fonts = [
+            '/System/Library/Fonts/STHeiti Light.ttc',
+            '/System/Library/Fonts/Supplemental/Songti.ttc',
+        ]
+    else:  # Linux
+        system_fonts = [
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+        ]
+
+    for fp in system_fonts:
+        if os.path.exists(fp):
+            return fp
+
+    # 尝试 apt 安装（Streamlit Cloud 支持）
+    if system == 'Linux':
+        try:
+            subprocess.run(
+                ['apt-get', 'install', '-y', 'fonts-noto-cjk'],
+                capture_output=True, timeout=60
+            )
+            # 安装后重新检查
+            for fp in ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+                       '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc']:
+                if os.path.exists(fp):
+                    return fp
+        except Exception:
+            pass
+
+    # 最后手段：从 GitHub 下载
+    st.warning('⏳ 首次运行，正在下载中文字体（约16MB），请稍候...')
+    for url in [FONT_URL, FONT_URL_ALT]:
+        if download_font(url, FONT_FILE):
+            if os.path.getsize(FONT_FILE) > 100000:
+                return FONT_FILE
+            os.remove(FONT_FILE)
+
+    raise RuntimeError(
+        '无法获取中文字体！请手动下载 NotoSansSC-Regular.otf 放入 fonts/ 目录'
+    )
+
+
+def setup_chinese_font():
+    """注册CJK字体，适配不同平台"""
+    font_path = ensure_chinese_font()
+
+    cn_font = 'ChineseFont'
+    try:
+        if font_path.endswith('.ttc'):
+            pdfmetrics.registerFont(TTFont(cn_font, font_path, subfontIndex=0))
+        else:
+            pdfmetrics.registerFont(TTFont(cn_font, font_path))
+    except Exception as e:
+        raise RuntimeError(f'字体注册失败: {e}')
+
+    # 创建样式，全部使用中文字体
+    styles = getSampleStyleSheet()
+    for style in styles.byName.values():
+        if isinstance(style, ParagraphStyle):
+            style.fontName = cn_font
+
+    return cn_font, styles
+
+
+@st.cache_resource
+def get_font_setup():
+    return setup_chinese_font()
+
+
 # 页面配置
 st.set_page_config(
     page_title="文件合并转PDF",
@@ -35,59 +148,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# 注册中文字体（Streamlit Cloud环境）
-def setup_chinese_font():
-    """注册CJK字体，适配不同平台"""
-    import platform
-    system = platform.system()
-    
-    font_paths = []
-    if system == 'Windows':
-        windir = os.environ.get('WINDIR', 'C:\\Windows')
-        font_paths = [
-            os.path.join(windir, 'Fonts', 'msyh.ttc'),
-            os.path.join(windir, 'Fonts', 'simhei.ttf'),
-            os.path.join(windir, 'Fonts', 'simsun.ttc'),
-        ]
-    elif system == 'Darwin':  # macOS
-        font_paths = [
-            '/System/Library/Fonts/STHeiti Light.ttc',
-            '/System/Library/Fonts/Supplemental/Songti.ttc',
-        ]
-    else:  # Linux (Streamlit Cloud)
-        font_paths = [
-            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-            '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
-            '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-        ]
-    
-    cn_font = 'Helvetica'  # 默认fallback
-    for fp in font_paths:
-        if os.path.exists(fp):
-            try:
-                font_name = os.path.splitext(os.path.basename(fp))[0]
-                if fp.endswith('.ttc'):
-                    pdfmetrics.registerFont(TTFont(font_name, fp, subfontIndex=0))
-                else:
-                    pdfmetrics.registerFont(TTFont(font_name, fp))
-                cn_font = font_name
-                break
-            except Exception as e:
-                continue
-    
-    # 创建样式
-    styles = getSampleStyleSheet()
-    for style in styles.byName.values():
-        if isinstance(style, ParagraphStyle):
-            style.fontName = cn_font
-    
-    return cn_font, styles
-
-@st.cache_resource
-def get_font_setup():
-    return setup_chinese_font()
 
 # 转换函数
 def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
