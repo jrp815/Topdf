@@ -41,10 +41,10 @@ from PIL import Image
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
 FONT_FILE = os.path.join(FONT_DIR, 'NotoSansSC-Regular.ttf')
 
-# Noto Sans SC Regular 字体下载地址（Google Fonts GitHub 仓库）
-FONT_URL = 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf'
-# 备用：Source Han Sans (思源黑体)
-FONT_URL_ALT = 'https://github.com/adobe-fonts/source-han-sans/raw/release/OTF/SimplifiedChinese/SourceHanSansSC-Regular.otf'
+# Noto Sans SC Regular TTF 字体（ReportLab 只支持 TTF，不支持 OTF PostScript 轮廓）
+FONT_URL = 'https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf'
+# 备用：Noto Sans CJK SC TTF
+FONT_URL_ALT = 'https://github.com/notofonts/noto-cjk/raw/main/Sans/TTF/NotoSansCJKsc-Regular.ttf'
 
 
 def download_font(url, dest_path):
@@ -60,7 +60,7 @@ def download_font(url, dest_path):
 def ensure_chinese_font():
     """确保中文字体可用，不存在则自动下载"""
     # 如果字体文件已存在，直接返回
-    if os.path.exists(FONT_FILE) and os.path.getsize(FONT_FILE) > 100000:
+    if os.path.exists(FONT_FILE) and os.path.getsize(FONT_FILE) > 50000:
         return FONT_FILE
 
     # 尝试系统字体
@@ -105,12 +105,12 @@ def ensure_chinese_font():
     st.warning('⏳ 首次运行，正在下载中文字体（约16MB），请稍候...')
     for url in [FONT_URL, FONT_URL_ALT]:
         if download_font(url, FONT_FILE):
-            if os.path.getsize(FONT_FILE) > 100000:
+            if os.path.getsize(FONT_FILE) > 50000:
                 return FONT_FILE
             os.remove(FONT_FILE)
 
     raise RuntimeError(
-        '无法获取中文字体！请手动下载 NotoSansSC-Regular.otf 放入 fonts/ 目录'
+        '无法获取中文字体！请手动下载 NotoSansSC TTF 字体放入 fonts/ 目录'
     )
 
 
