@@ -204,6 +204,7 @@ def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
             ps = ParagraphStyle(
                 'auto_para',
                 parent=styles[base_sn],
+                fontSize=getattr(styles[base_sn], 'fontSize', None) or 10.5,
                 alignment=_rl_align(para.alignment),
                 spaceBefore=Pt(pf.space_before.pt) if pf.space_before else None,
                 spaceAfter=Pt(pf.space_after.pt) if pf.space_after else None,
