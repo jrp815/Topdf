@@ -39,5 +39,5 @@ Thumbs.db
 # Streamlit
 .streamlit/secrets.toml
 
-# 字体缓存（运行时自动下载）
-fonts/
+# 字体缓存（运行时自动下载的原始文件）
+fonts/font_raw

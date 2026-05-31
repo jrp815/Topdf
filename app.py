@@ -81,11 +81,11 @@ def convert_to_ttf(src_path, dst_path):
 
 
 def ensure_chinese_font():
-    """确保中文字体可用，不存在则自动下载并转换为TTF"""
+    """确保中文字体可用，优先使用内嵌字体"""
     import sys
 
-    # 如果已转换好的 TTF 存在，直接返回
-    if os.path.exists(FONT_FILE_TTF) and os.path.getsize(FONT_FILE_TTF) > 50000:
+    # 1️⃣ 优先：使用项目内嵌的 TTF 字体（随仓库分发，最可靠）
+    if os.path.exists(FONT_FILE_TTF) and os.path.getsize(FONT_FILE_TTF) > 100000:
         return FONT_FILE_TTF
 
     # 尝试系统字体（Windows/macOS/Linux）
