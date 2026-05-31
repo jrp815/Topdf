@@ -381,7 +381,7 @@ def main():
     uploaded_files = st.file_uploader(
         "选择要合并的文件",
         accept_multiple_files=True,
-        type=['doc', 'docx', 'xls', 'xlsx', 'pdf', 'jpg', 'jpeg', 'png', 'bmp'],
+        type=['doc', 'docx', '.xls', '.xlsx', 'pdf', 'jpg', 'jpeg', 'png', 'bmp'],
     )
 
     if not uploaded_files:
@@ -444,7 +444,7 @@ def main():
                         pdf_files.append(out_pdf)
                         logs.append(f"✅ {f.name} → 直接使用")
 
-                    elif ext in ('.doc', 'docx', 'xls', 'xlsx'):
+                    elif ext in ('.doc', '.docx', '.xls', '.xlsx'):
                         # 优先用 LibreOffice
                         converted = False
                         if lo_available:
