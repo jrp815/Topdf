@@ -4,6 +4,11 @@
 
 作者: QClaw
 部署: Streamlit Cloud
+
+转换引擎：
+- Linux/macOS: LibreOffice headless (保持原始格式)
+- Windows:     COM 自动化 (Word/Excel) + LibreOffice fallback
+- 图片:        Pillow (嵌入A4)
 """
 
 import streamlit as st
@@ -12,467 +17,345 @@ import tempfile
 import io
 import subprocess
 import platform
-import urllib.request
 import shutil
 from datetime import datetime
 from pathlib import Path
 
 # PDF处理
 from pypdf import PdfWriter, PdfReader
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Image as RLImage, Paragraph, Spacer, Table, TableStyle, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
-# 文档处理
-from docx import Document
-import openpyxl
+# 图片处理
 from PIL import Image
 
+
 # ============================================================
-# 中文字体自动安装与注册
-# Streamlit Cloud 是 Linux，默认无中文字体，需要自动下载安装
+# LibreOffice 检测与安装 (Streamlit Cloud / Linux)
 # ============================================================
-
-# 字体缓存目录（项目内）
-FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
-FONT_FILE_RAW = os.path.join(FONT_DIR, 'font_raw')   # 原始下载文件（任意格式）
-FONT_FILE_TTF = os.path.join(FONT_DIR, 'ChineseFont.ttf') # 转换后的纯TTF
-
-# Noto Sans SC - Google 官方中文字体（OTF格式，运行时fonttools转TTF）
-FONT_URL = 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf'
-FONT_URL_ALT = 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/TTC/NotoSansCJKsc-Regular.otf'
-
-
-def download_font(url, dest_path):
-    """下载字体文件"""
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+def check_libreoffice():
+    """检查 LibreOffice 是否可用"""
     try:
-        urllib.request.urlretrieve(url, dest_path)
-        return True
-    except Exception:
-        return False
-
-
-def convert_to_ttf(src_path, dst_path):
-    """用 fonttools 将 OTF/TTC/OTF 转换为纯 TTF（ReportLab 只支持 TrueType）"""
-    try:
-        from fontTools.ttLib import TTFont
-        font = TTFont(src_path)
-        font.flavor = None  # 确保是纯 TTF
-        font.save(dst_path)
-        font.close()
-        return True
-    except ImportError:
-        st.error('正在安装 fonttools 进行字体转换...')
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'fonttools', '-q'])
-        from fontTools.ttLib import TTFont
-        font = TTFont(src_path)
-        font.flavor = None
-        font.save(dst_path)
-        font.close()
-        return True
+        result = subprocess.run(
+            ['libreoffice', '--version'],
+            capture_output=True, text=True, timeout=10
+        )
+        return True, result.stdout.strip()
+    except FileNotFoundError:
+        return False, None
     except Exception as e:
-        st.error(f'字体转换失败: {e}')
+        return False, str(e)
+
+
+def install_libreoffice():
+    """在 Linux 上安装 LibreOffice"""
+    if platform.system() != 'Linux':
         return False
-
-
-def ensure_chinese_font():
-    """确保中文字体可用，优先使用内嵌字体"""
-    import sys
-
-    # 1️⃣ 优先：使用项目内嵌的 TTF 字体（随仓库分发，最可靠）
-    if os.path.exists(FONT_FILE_TTF) and os.path.getsize(FONT_FILE_TTF) > 100000:
-        return FONT_FILE_TTF
-
-    # 尝试系统字体（Windows/macOS/Linux）
-    system = platform.system()
-    system_fonts = []
-    if system == 'Windows':
-        windir = os.environ.get('WINDIR', 'C:\\Windows')
-        for fname in ['msyh.ttc', 'simhei.ttf', 'simsun.ttc']:
-            system_fonts.append(os.path.join(windir, 'Fonts', fname))
-    elif system == 'Darwin':
-        system_fonts = [
-            '/System/Library/Fonts/STHeiti Light.ttc',
-            '/System/Library/Fonts/Supplemental/Songti.ttc',
-        ]
-    else:  # Linux
-        system_fonts = [
-            '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
-            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-            '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-            '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',
-        ]
-
-    for fp in system_fonts:
-        if os.path.exists(fp):
-            # 尝试直接注册，如果失败则转换
-            try:
-                pdfmetrics.registerFont(TTFont('test_font', fp,
-                    subfontIndex=0 if fp.endswith('.ttc') else None))
-                return fp  # 可以直接使用
-            except Exception:
-                # 注册失败，尝试转换
-                if convert_to_ttf(fp, FONT_FILE_TTF):
-                    return FONT_FILE_TTF
-
-    # 尝试 apt 安装字体
-    if system == 'Linux':
-        try:
-            subprocess.run(
-                ['apt-get', 'install', '-y', '-qq', 'fonts-noto-cjk-extra'],
-                capture_output=True, timeout=120
-            )
-            # 安装后查找 TTF 文件
-            import glob
-            ttf_files = glob.glob('/usr/share/fonts/**/NotoSans*.ttf', recursive=True)
-            ttf_files += glob.glob('/usr/share/fonts/**/NotoSansCJKsc*.ttf', recursive=True)
-            for fp in ttf_files:
-                if os.path.getsize(fp) > 100000:
-                    return fp
-        except Exception:
-            pass
-
-    # 最后手段：从 GitHub 下载原始字体，然后转换为 TTF
-    st.warning('⏳ 首次运行，正在下载中文字体并转换格式，请稍候...')
-    for url in [FONT_URL, FONT_URL_ALT]:
-        if download_font(url, FONT_FILE_RAW):
-            if os.path.getsize(FONT_FILE_RAW) > 50000:
-                if convert_to_ttf(FONT_FILE_RAW, FONT_FILE_TTF):
-                    return FONT_FILE_TTF
-            os.remove(FONT_FILE_RAW)
-
-    raise RuntimeError(
-        '无法获取中文字体！请手动下载一个支持中文的 TTF 字体放入 fonts/ 目录'
+    
+    st.warning('⏳ 正在安装 LibreOffice（首次约需1-2分钟）...')
+    
+    # 更新包列表并安装
+    subprocess.run(['apt-get', 'update', '-qq'], capture_output=True, timeout=120)
+    result = subprocess.run(
+        ['apt-get', 'install', '-y', '-qq',
+         'libreoffice', 'libreoffice-writer'],
+        capture_output=True, timeout=300
     )
+    
+    ok, ver = check_libreoffice()
+    if ok:
+        st.success(f'✅ LibreOffice 安装成功: {ver}')
+        return True
+    else:
+        st.error('❌ LibreOffice 安装失败')
+        return False
 
 
-def setup_chinese_font():
-    """注册CJK字体，适配不同平台"""
-    font_path = ensure_chinese_font()
+def ensure_libreoffice():
+    """确保 LibreOffice 可用"""
+    ok, ver = check_libreoffice()
+    if ok:
+        return True
+    
+    # 尝试安装
+    return install_libreoffice()
 
-    cn_font = 'ChineseFont'
+
+# ============================================================
+# 文件转换函数
+# ============================================================
+def convert_with_libreoffice(src_path, output_dir):
+    """
+    用 LibreOffice headless 将文件转换为 PDF。
+    支持格式: doc, docx, xls, xlsx, ppt, pptx, odt, etc.
+    返回生成的 PDF 路径，失败返回 None。
+    """
     try:
-        if font_path.endswith('.ttc'):
-            pdfmetrics.registerFont(TTFont(cn_font, font_path, subfontIndex=0))
-        else:
-            pdfmetrics.registerFont(TTFont(cn_font, font_path))
+        result = subprocess.run(
+            [
+                'libreoffice', '--headless', '--convert-to', 'pdf',
+                '--outdir', output_dir,
+                src_path
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, 'HOME': os.environ.get('HOME', '/tmp')}
+        )
+        
+        # LibreOffice 输出的 PDF 文件名与源文件相同（扩展名改为 .pdf）
+        base_name = Path(src_path).stem
+        pdf_path = os.path.join(output_dir, f"{base_name}.pdf")
+        
+        if os.path.exists(pdf_path):
+            return pdf_path
+        
+        # 有时 LibreOffice 会用原始文件名（如果含特殊字符会变化）
+        # 尝试查找目录下新生成的 PDF
+        for f in os.listdir(output_dir):
+            if f.endswith('.pdf'):
+                fp = os.path.join(output_dir, f)
+                # 检查是否是最近创建的（10秒内）
+                if os.path.getmtime(fp) > os.path.gettime(src_path):
+                    return fp
+        
+        return None
+        
+    except subprocess.TimeoutExpired:
+        st.error(f'⏰ 转换超时: {Path(src_path).name}')
+        return None
     except Exception as e:
-        raise RuntimeError(f'字体注册失败: {e}')
+        st.error(f'❌ LibreOffice 转换失败 ({Path(src_path).name}): {e}')
+        return None
 
-    # 创建样式，全部使用中文字体
-    styles = getSampleStyleSheet()
-    for style in styles.byName.values():
-        if isinstance(style, ParagraphStyle):
-            style.fontName = cn_font
-
-    return cn_font, styles
-
-
-@st.cache_resource
-def get_font_setup():
-    return setup_chinese_font()
-
-
-# 页面配置
-st.set_page_config(
-    page_title="文件合并转PDF",
-    page_icon="📄",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# 转换函数
-def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
-    """将docx转换为PDF"""
-    doc = Document(docx_path)
-    
-    pdf_doc = SimpleDocTemplate(pdf_path, pagesize=A4,
-                                 leftMargin=20*mm, rightMargin=20*mm,
-                                 topMargin=20*mm, bottomMargin=20*mm)
-    
-    story = []
-    
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if not text:
-            story.append(Spacer(1, 6))
-            continue
-        
-        # 根据段落样式选择PDF样式
-        style_name = 'Normal'
-        if para.style.name.startswith('Heading'):
-            style_name = 'Heading1'
-        elif 'Title' in para.style.name:
-            style_name = 'Title'
-        
-        try:
-            p = Paragraph(text, styles[style_name])
-        except:
-            p = Paragraph(text, styles['Normal'])
-        story.append(p)
-    
-    # 处理表格
-    for table in doc.tables:
-        table_data = []
-        for row in table.rows:
-            row_data = []
-            for cell in row.cells:
-                cell_text = cell.text.strip()
-                row_data.append(Paragraph(cell_text, styles['Normal']))
-            table_data.append(row_data)
-        
-        if table_data:
-            # 计算列宽
-            num_cols = len(table_data[0])
-            col_width = (A4[0] - 40*mm) / num_cols
-            
-            t = Table(table_data, colWidths=[col_width]*num_cols)
-            t.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E0E0E0')),
-                ('FONTNAME', (0, 0), (-1, -1), cn_font),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ]))
-            story.append(t)
-            story.append(Spacer(1, 12))
-    
-    pdf_doc.build(story)
-
-def convert_xlsx_to_pdf(xlsx_path, pdf_path, cn_font, styles):
-    """将xlsx转换为PDF"""
-    wb = openpyxl.load_workbook(xlsx_path)
-    
-    pdf_doc = SimpleDocTemplate(pdf_path, pagesize=A4,
-                                 leftMargin=15*mm, rightMargin=15*mm,
-                                 topMargin=15*mm, bottomMargin=15*mm)
-    
-    story = []
-    
-    for sheet_name in wb.sheetnames:
-        sheet = wb[sheet_name]
-        
-        # 添加工作表标题
-        story.append(Paragraph(f"工作表: {sheet_name}", styles['Heading2']))
-        story.append(Spacer(1, 10))
-        
-        # 获取表格数据
-        table_data = []
-        max_rows = min(sheet.max_row, 100)  # 限制行数
-        max_cols = min(sheet.max_column, 20)  # 限制列数
-        
-        for row_idx in range(1, max_rows + 1):
-            row_data = []
-            for col_idx in range(1, max_cols + 1):
-                cell = sheet.cell(row=row_idx, column=col_idx)
-                value = str(cell.value) if cell.value is not None else ''
-                row_data.append(Paragraph(value, styles['Normal']))
-            table_data.append(row_data)
-        
-        if table_data:
-            col_width = (A4[0] - 30*mm) / max_cols
-            t = Table(table_data, colWidths=[col_width]*max_cols)
-            t.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E0E0E0')),
-                ('FONTNAME', (0, 0), (-1, -1), cn_font),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ]))
-            story.append(t)
-        
-        story.append(PageBreak())
-    
-    pdf_doc.build(story)
 
 def convert_image_to_pdf(img_path, pdf_path):
-    """将图片转换为PDF（A4页面）"""
+    """将图片转换为 PDF（居中显示在 A4 页面上）"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Image as RLImage
+
     img = Image.open(img_path)
     if img.mode in ('RGBA', 'P'):
         img = img.convert('RGB')
-    
+
     page_w, page_h = A4
     margin = 15 * mm
     avail_w = page_w - 2 * margin
     avail_h = page_h - 2 * margin
-    
+
     img_w, img_h = img.size
     ratio = min(avail_w / img_w, avail_h / img_h)
     display_w = img_w * ratio
     display_h = img_h * ratio
-    
+
     pdf_doc = SimpleDocTemplate(pdf_path, pagesize=A4,
                                  leftMargin=margin, rightMargin=margin,
                                  topMargin=margin, bottomMargin=margin)
     story = [RLImage(img_path, width=display_w, height=display_h)]
     pdf_doc.build(story)
 
+
 def merge_pdfs(pdf_paths, output_path):
-    """合并多个PDF"""
+    """合并多个 PDF 为一个"""
     writer = PdfWriter()
     for pdf_path in pdf_paths:
         reader = PdfReader(pdf_path)
         for page in reader.pages:
             writer.add_page(page)
-    
+
     with open(output_path, 'wb') as f:
         writer.write(f)
 
-# Streamlit应用
+
+# ============================================================
+# Streamlit 应用主界面
+# ============================================================
+
+st.set_page_config(
+    page_title="📄 文件合并转PDF",
+    page_icon="📄",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+
 def main():
     st.title("📄 文件合并转PDF工具")
-    st.markdown("---")
-    
-    # 侧边栏说明
+    st.markdown("保持原始格式 · 支持 Word/Excel/PDF/图片")
+
+    # 侧边栏
     with st.sidebar:
         st.header("📖 使用说明")
         st.markdown("""
-        **支持的文件格式：**
-        - Word文档：`.docx`
-        - Excel表格：`.xlsx`
-        - PDF文档：`.pdf`
-        - 图片文件：`.jpg`, `.png`, `.bmp`
-        
-        **使用步骤：**
-        1. 上传需要合并的文件
-        2. 调整文件顺序（拖拽或重新上传）
-        3. 点击"合并生成PDF"
-        4. 下载合并后的PDF文件
-        
-        **注意事项：**
-        - 图片会自动适配A4页面
-        - Excel表格最多显示100行、20列
-        - `.doc`格式建议先转换为`.docx`
+**支持的文件格式：**
+- 📝 Word：`.doc` `.docx`
+- 📊 Excel：`.xls` `.xlsx`
+- 📄 PDF：`.pdf`
+- 🖼️ 图片：`.jpg` `.png` `.bmp`
+
+**使用步骤：**
+1. 上传需要合并的文件
+2. 调整顺序（按上传顺序排列）
+3. 点击 **"合并生成PDF"**
+4. 下载结果
+
+**✨ 格式保留说明：**
+- Word/Excel 通过 **LibreOffice** 转换
+- **完整保留**字体、表格样式、图片、页眉页脚等
+- 图片自动适配 A4 页面
         """)
         
         st.markdown("---")
-        st.markdown("💡 提示：文件顺序按上传顺序排列")
-    
-    # 文件上传区域
+        # 显示 LibreOffice 状态
+        lo_ok, lo_ver = check_libreoffice()
+        if lo_ok:
+            st.success(f'✅ LibreOffice 就绪\n`{lo_ver.split(chr(10))[0]}`')
+        else:
+            st.warning('⚠️ LibreOffice 未安装\n将在首次转换时自动安装')
+
+    # 文件上传
     st.header("1️⃣ 上传文件")
     uploaded_files = st.file_uploader(
-        "选择要合并的文件",
+        "选择要合并的文件（支持多文件、混合格式）",
         accept_multiple_files=True,
-        type=['docx', 'xlsx', 'pdf', 'jpg', 'jpeg', 'png', 'bmp'],
-        help="支持多文件上传，可混合不同格式"
+        type=['doc', 'docx', 'xls', 'xlsx', 'pdf', 'jpg', 'jpeg', 'png', 'bmp'],
+        help="可同时上传 Word、Excel、PDF、图片"
     )
-    
-    if uploaded_files:
-        st.success(f"已上传 {len(uploaded_files)} 个文件")
-        
-        # 显示文件列表
-        st.header("2️⃣ 文件列表")
-        
-        # 创建可排序的文件列表
-        file_order = []
-        for i, file in enumerate(uploaded_files):
-            col1, col2, col3 = st.columns([1, 4, 2])
-            with col1:
-                st.write(f"**{i+1}**")
-            with col2:
-                st.write(f"{file.name}")
-            with col3:
-                ext = Path(file.name).suffix.lower()
-                type_icon = {
-                    '.docx': '📝 Word',
-                    '.xlsx': '📊 Excel',
-                    '.pdf': '📄 PDF',
-                    '.jpg': '🖼️ 图片',
-                    '.jpeg': '🖼️ 图片',
-                    '.png': '🖼️ 图片',
-                    '.bmp': '🖼️ 图片'
-                }.get(ext, '📁 文件')
-                st.write(type_icon)
-            file_order.append(i)
-        
-        # 合并按钮
-        st.header("3️⃣ 生成PDF")
-        
-        if st.button("🔗 合并生成PDF", type="primary", use_container_width=True):
-            with st.spinner("正在处理文件..."):
-                try:
-                    cn_font, styles = get_font_setup()
-                    
-                    # 创建临时目录
-                    temp_dir = tempfile.mkdtemp()
-                    pdf_files = []
-                    
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    for i, file in enumerate(uploaded_files):
-                        status_text.text(f"处理: {file.name}")
-                        progress_bar.progress((i + 1) / len(uploaded_files))
-                        
-                        # 保存上传文件到临时目录
-                        file_path = os.path.join(temp_dir, file.name)
-                        with open(file_path, 'wb') as f:
-                            f.write(file.getvalue())
-                        
-                        # 转换为PDF
-                        ext = Path(file.name).suffix.lower()
-                        pdf_path = os.path.join(temp_dir, f"{i:03d}.pdf")
-                        
-                        if ext == '.pdf':
-                            # 直接复制
-                            with open(file_path, 'rb') as src:
-                                with open(pdf_path, 'wb') as dst:
-                                    dst.write(src.read())
-                            pdf_files.append(pdf_path)
-                        
-                        elif ext == '.docx':
-                            convert_docx_to_pdf(file_path, pdf_path, cn_font, styles)
-                            pdf_files.append(pdf_path)
-                        
-                        elif ext == '.xlsx':
-                            convert_xlsx_to_pdf(file_path, pdf_path, cn_font, styles)
-                            pdf_files.append(pdf_path)
-                        
-                        elif ext in ['.jpg', '.jpeg', '.png', '.bmp']:
-                            convert_image_to_pdf(file_path, pdf_path)
-                            pdf_files.append(pdf_path)
-                    
-                    # 合并PDF
-                    status_text.text("正在合并PDF...")
-                    merged_path = os.path.join(temp_dir, "merged.pdf")
-                    merge_pdfs(pdf_files, merged_path)
-                    
-                    # 读取合并后的PDF
-                    with open(merged_path, 'rb') as f:
-                        pdf_bytes = f.read()
-                    
-                    # 清理临时文件
-                    import shutil
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    
-                    progress_bar.progress(100)
-                    status_text.text("完成！")
-                    
-                    # 显示下载按钮
-                    st.success(f"✅ 合并完成！共 {len(uploaded_files)} 个文件，{len(PdfReader(io.BytesIO(pdf_bytes)).pages)} 页")
-                    
-                    # 生成文件名
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    download_filename = f"合并文档_{timestamp}.pdf"
-                    
-                    st.download_button(
-                        label="📥 下载合并后的PDF",
-                        data=pdf_bytes,
-                        file_name=download_filename,
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                    
-                except Exception as e:
-                    st.error(f"处理失败: {str(e)}")
-                    st.exception(e)
-    
-    else:
+
+    if not uploaded_files:
         st.info("👆 请先上传需要合并的文件")
+        return
+
+    st.success(f"已上传 **{len(uploaded_files)}** 个文件")
+
+    # 文件列表预览
+    st.header("2️⃣ 文件列表")
+    cols = st.columns(5)
+    cols[0].markdown("**序号**")
+    cols[1].markdown("**文件名**")
+    cols[2].markdown("**类型**")
+    cols[3].markdown("**大小**")
+    cols[4].markdown("**状态**")
+
+    type_icons = {
+        '.doc': '📝 Word', '.docx': '📝 Word',
+        '.xls': '📊 Excel', '.xlsx': '📊 Excel',
+        '.pdf': '📄 PDF',
+        '.jpg': '🖼️ 图片', '.jpeg': '🖼️ 图片', '.png': '🖼️ 图片', '.bmp': '🖼️ 图片'
+    }
+
+    for i, file in enumerate(uploaded_files):
+        ext = Path(file.name).suffix.lower()
+        c = st.columns(5)
+        c[0].write(f"`{i+1}`")
+        c[1].write(file.name)
+        c[2].write(type_icons.get(ext, '📁 其他'))
+        c[3].write(f"{file.size / 1024:.1f} KB")
+        c[4].write("✅ 待处理")
+
+    # 合并按钮
+    st.header("3️⃣ 生成PDF")
+
+    if st.button("🔗 合并生成PDF", type="primary", use_container_width=True):
+        with st.spinner("正在处理..."):
+            try:
+                # 确保 LibreOffice 可用
+                if not ensure_libreoffice():
+                    st.error("无法初始化转换引擎，请刷新重试")
+                    return
+
+                # 创建临时工作目录
+                temp_dir = tempfile.mkdtemp()
+                convert_dir = os.path.join(temp_dir, "convert")
+                os.makedirs(convert_dir, exist_ok=True)
+
+                pdf_files = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                log_area = st.empty()
+
+                logs = []
+
+                for i, file in enumerate(uploaded_files):
+                    status_text.text(f"📂 处理中 ({i+1}/{len(uploaded_files)}): {file.name}")
+                    progress_bar.progress((i + 0.5) / len(uploaded_files))
+
+                    # 保存上传文件
+                    file_path = os.path.join(temp_dir, file.name)
+                    with open(file_path, 'wb') as f:
+                        f.write(file.getvalue())
+
+                    ext = Path(file.name).suffix.lower()
+
+                    if ext == '.pdf':
+                        # PDF 直接复制
+                        pdf_path = os.path.join(convert_dir, f"{i:03d}.pdf")
+                        shutil.copy(file_path, pdf_path)
+                        pdf_files.append(pdf_path)
+                        logs.append(f"✅ {file.name} → 直接使用")
+
+                    elif ext in ('.doc', '.docx', '.xls', '.xlsx'):
+                        # 用 LibreOffice 转换（保持格式！）
+                        pdf_path = convert_with_libreoffice(file_path, convert_dir)
+                        if pdf_path:
+                            # 重命名以保序
+                            ordered_path = os.path.join(convert_dir, f"{i:03d}.pdf")
+                            shutil.move(pdf_path, ordered_path)
+                            pdf_files.append(ordered_path)
+                            logs.append(f"✅ {file.name} → LibreOffice 转换（保留格式）")
+                        else:
+                            logs.append(f"❌ {file.name} → 转换失败")
+
+                    elif ext in ('.jpg', '.jpeg', '.png', '.bmp'):
+                        # 图片转 PDF
+                        pdf_path = os.path.join(convert_dir, f"{i:03d}.pdf")
+                        convert_image_to_pdf(file_path, pdf_path)
+                        pdf_files.append(pdf_path)
+                        logs.append(f"✅ {file.name} → 图片嵌入 A4")
+
+                    else:
+                        logs.append(f"⏭️ {file.name} → 不支持的格式，已跳过")
+
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+
+                # 显示处理日志
+                log_area.markdown("\n".join(logs))
+
+                if not pdf_files:
+                    st.error("没有成功转换的文件")
+                    return
+
+                # 合并所有 PDF
+                status_text.text("📋 正在合并 PDF...")
+                merged_path = os.path.join(temp_dir, "merged.pdf")
+                merge_pdfs(pdf_files, merged_path)
+
+                # 读取结果
+                with open(merged_path, 'rb') as f:
+                    pdf_bytes = f.read()
+
+                # 清理临时文件
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+                progress_bar.progress(100)
+                status_text.text("✅ 完成！")
+
+                page_count = len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+                st.success(f"🎉 合并完成！{len(pdf_files)} 个文件 → {page_count} 页")
+
+                # 下载按钮
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                st.download_button(
+                    label="📥 下载合并后的 PDF",
+                    data=pdf_bytes,
+                    file_name=f"合并文档_{timestamp}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+
+            except Exception as e:
+                st.error(f"❌ 处理失败: {e}")
+                st.exception(e)
+
 
 if __name__ == "__main__":
     main()
