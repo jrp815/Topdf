@@ -13,7 +13,7 @@ import io
 import subprocess
 import platform
 import urllib.request
-import zipfile
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -39,12 +39,12 @@ from PIL import Image
 
 # 字体缓存目录（项目内）
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
-FONT_FILE = os.path.join(FONT_DIR, 'NotoSansSC-Regular.ttf')
+FONT_FILE_RAW = os.path.join(FONT_DIR, 'font_raw')   # 原始下载文件（任意格式）
+FONT_FILE_TTF = os.path.join(FONT_DIR, 'ChineseFont.ttf') # 转换后的纯TTF
 
-# Noto Sans SC Regular TTF 字体（ReportLab 只支持 TTF，不支持 OTF PostScript 轮廓）
-FONT_URL = 'https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf'
-# 备用：Noto Sans CJK SC TTF
-FONT_URL_ALT = 'https://github.com/notofonts/noto-cjk/raw/main/Sans/TTF/NotoSansCJKsc-Regular.ttf'
+# Noto Sans SC - Google 官方中文字体（OTF格式，运行时fonttools转TTF）
+FONT_URL = 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf'
+FONT_URL_ALT = 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/TTC/NotoSansCJKsc-Regular.otf'
 
 
 def download_font(url, dest_path):
@@ -57,13 +57,38 @@ def download_font(url, dest_path):
         return False
 
 
-def ensure_chinese_font():
-    """确保中文字体可用，不存在则自动下载"""
-    # 如果字体文件已存在，直接返回
-    if os.path.exists(FONT_FILE) and os.path.getsize(FONT_FILE) > 50000:
-        return FONT_FILE
+def convert_to_ttf(src_path, dst_path):
+    """用 fonttools 将 OTF/TTC/OTF 转换为纯 TTF（ReportLab 只支持 TrueType）"""
+    try:
+        from fontTools.ttLib import TTFont
+        font = TTFont(src_path)
+        font.flavor = None  # 确保是纯 TTF
+        font.save(dst_path)
+        font.close()
+        return True
+    except ImportError:
+        st.error('正在安装 fonttools 进行字体转换...')
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'fonttools', '-q'])
+        from fontTools.ttLib import TTFont
+        font = TTFont(src_path)
+        font.flavor = None
+        font.save(dst_path)
+        font.close()
+        return True
+    except Exception as e:
+        st.error(f'字体转换失败: {e}')
+        return False
 
-    # 尝试系统字体
+
+def ensure_chinese_font():
+    """确保中文字体可用，不存在则自动下载并转换为TTF"""
+    import sys
+
+    # 如果已转换好的 TTF 存在，直接返回
+    if os.path.exists(FONT_FILE_TTF) and os.path.getsize(FONT_FILE_TTF) > 50000:
+        return FONT_FILE_TTF
+
+    # 尝试系统字体（Windows/macOS/Linux）
     system = platform.system()
     system_fonts = []
     if system == 'Windows':
@@ -77,40 +102,52 @@ def ensure_chinese_font():
         ]
     else:  # Linux
         system_fonts = [
-            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
             '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
             '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+            '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',
         ]
 
     for fp in system_fonts:
         if os.path.exists(fp):
-            return fp
+            # 尝试直接注册，如果失败则转换
+            try:
+                pdfmetrics.registerFont(TTFont('test_font', fp,
+                    subfontIndex=0 if fp.endswith('.ttc') else None))
+                return fp  # 可以直接使用
+            except Exception:
+                # 注册失败，尝试转换
+                if convert_to_ttf(fp, FONT_FILE_TTF):
+                    return FONT_FILE_TTF
 
-    # 尝试 apt 安装（Streamlit Cloud 支持）
+    # 尝试 apt 安装字体
     if system == 'Linux':
         try:
             subprocess.run(
-                ['apt-get', 'install', '-y', 'fonts-noto-cjk'],
-                capture_output=True, timeout=60
+                ['apt-get', 'install', '-y', '-qq', 'fonts-noto-cjk-extra'],
+                capture_output=True, timeout=120
             )
-            # 安装后重新检查
-            for fp in ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-                       '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc']:
-                if os.path.exists(fp):
+            # 安装后查找 TTF 文件
+            import glob
+            ttf_files = glob.glob('/usr/share/fonts/**/NotoSans*.ttf', recursive=True)
+            ttf_files += glob.glob('/usr/share/fonts/**/NotoSansCJKsc*.ttf', recursive=True)
+            for fp in ttf_files:
+                if os.path.getsize(fp) > 100000:
                     return fp
         except Exception:
             pass
 
-    # 最后手段：从 GitHub 下载
-    st.warning('⏳ 首次运行，正在下载中文字体（约16MB），请稍候...')
+    # 最后手段：从 GitHub 下载原始字体，然后转换为 TTF
+    st.warning('⏳ 首次运行，正在下载中文字体并转换格式，请稍候...')
     for url in [FONT_URL, FONT_URL_ALT]:
-        if download_font(url, FONT_FILE):
-            if os.path.getsize(FONT_FILE) > 50000:
-                return FONT_FILE
-            os.remove(FONT_FILE)
+        if download_font(url, FONT_FILE_RAW):
+            if os.path.getsize(FONT_FILE_RAW) > 50000:
+                if convert_to_ttf(FONT_FILE_RAW, FONT_FILE_TTF):
+                    return FONT_FILE_TTF
+            os.remove(FONT_FILE_RAW)
 
     raise RuntimeError(
-        '无法获取中文字体！请手动下载 NotoSansSC TTF 字体放入 fonts/ 目录'
+        '无法获取中文字体！请手动下载一个支持中文的 TTF 字体放入 fonts/ 目录'
     )
 
 
