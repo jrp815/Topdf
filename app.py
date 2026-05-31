@@ -4,6 +4,7 @@
 
 作者: QClaw
 部署: Streamlit Cloud
+版本: v1.3.0
 
 转换引擎（自动选择）：
 1. LibreOffice headless  → 完美保留格式（需系统安装）
@@ -33,10 +34,17 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
 
 from docx import Document
-from docx.shared import Pt, RGBColor
+from docx.shared import Pt, RGBColor, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import openpyxl
 from PIL import Image
+
+
+# ============================================================
+# 版本信息
+# ============================================================
+__version__ = "v1.3.0"
+__version_date = "2026-05-31"
 
 
 # ============================================================
@@ -82,8 +90,12 @@ def setup_chinese_font():
         'Heading1':  {'fontSize': 16, 'spaceBefore': 14, 'spaceAfter': 8},
         'Heading2':  {'fontSize': 13, 'spaceBefore': 10, 'spaceAfter': 6},
         'Heading3':  {'fontSize': 11, 'spaceBefore': 8,  'spaceAfter': 4},
-        'Normal':    {'fontSize': 10.5, 'leading': 16, 'alignment': TA_JUSTIFY},
-        'BodyText':  {'fontSize': 10.5, 'leading': 16, 'alignment': TA_JUSTIFY},
+        'Normal':    {'fontSize': 10.5, 'leading': 18, 'alignment': TA_JUSTIFY,
+                      'firstLineIndent': Pt(21),  # 中文首行缩进2字符
+                      },
+        'BodyText':  {'fontSize': 10.5, 'leading': 18, 'alignment': TA_JUSTIFY,
+                      'firstLineIndent': Pt(21),
+                      },
     }
 
     for name, props in style_map.items():
@@ -156,6 +168,16 @@ def _rl_align(align):
     return m.get(align, TA_JUSTIFY)
 
 
+def _emu_to_pt(emu_val):
+    """将 EMU 单位转换为 Point (1pt = 12700 EMU)"""
+    if emu_val is None:
+        return None
+    try:
+        return emu_val.pt if hasattr(emu_val, 'pt') else float(emu_val) / 12700
+    except (AttributeError, TypeError):
+        return None
+
+
 # ============================================================
 # Word → PDF（增强版：保留格式细节）
 # ============================================================
@@ -181,8 +203,81 @@ def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
             from docx.text.paragraph import Paragraph as DPara
             para = DPara(elem, doc)
 
-            # 收集所有 run 的文本
-            full_text = ''.join(run.text or '' for run in para.runs).strip()
+            # 收集所有 run 的文本和格式 → 构建带格式的 XML 片段
+            # ReportLab Paragraph 支持 <b>、<i>、<font>、<color> 等 XML 标签
+            parts = []
+            has_formatting = False
+            for run in para.runs:
+                text = run.text or ''
+                if not text.strip() and not text:
+                    continue
+                
+                # 获取 run 格式
+                bold = run.bold
+                italic = run.italic
+                underline = run.underline
+                font_size = None
+                font_name = None
+                color_val = None
+                
+                try:
+                    rpr = run._element.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPr')
+                    if rpr is not None:
+                        # 字体大小
+                        sz = rpr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz')
+                        if sz is not None and sz.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val'):
+                            font_size = int(sz.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')) / 2  # half-points to points
+                        
+                        # 字体名称
+                        rFonts = rpr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rFonts')
+                        if rFonts is not None:
+                            font_name = rFonts.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii') or \
+                                       rFonts.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia')
+                        
+                        # 颜色
+                        color_elem = rpr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}color')
+                        if color_elem is not None and color_elem.get('{http://schemas.openxmlformats.org/wordprocessingml/2006main}val'):
+                            color_val = color_elem.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+                except Exception:
+                    pass
+                
+                # 如果有特殊格式，构建 XML 标签
+                formatted = text
+                if bold or italic or underline or font_size or color_val or font_name:
+                    has_formatting = True
+                    
+                    tags_open = []
+                    tags_close = []
+                    
+                    if font_name:
+                        tags_open.append(f'<font face="{cn_font}" name="{cn_font}">')
+                        tags_close.insert(0, '</font>')
+                    
+                    if font_size:
+                        tags_open.append(f'<font size="{font_size}">')
+                        tags_close.insert(0, '</font>')
+                    
+                    if color_val:
+                        tags_open.append(f'<font color="#{color_val}">')
+                        tags_close.insert(0, '</font>')
+                    
+                    if bold:
+                        tags_open.append('<b>')
+                        tags_close.insert(0, '</b>')
+                    
+                    if italic:
+                        tags_open.append('<i>')
+                        tags_close.insert(0, '</i>')
+                    
+                    if underline:
+                        tags_open.append('<u>')
+                        tags_close.insert(0, '</u>')
+                    
+                    formatted = ''.join(tags_open) + text + ''.join(tags_close)
+                
+                parts.append(formatted)
+            
+            full_text = ''.join(parts).strip()
             if not full_text:
                 story.append(Spacer(1, 6))
                 continue
@@ -201,17 +296,28 @@ def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
                 base_sn = 'Normal'
 
             pf = para.paragraph_format
+            
+            # 安全获取数值，确保不为 None
+            def safe_pt(val, default=0):
+                """安全地将值转换为 Pt，如果为 None 则返回默认值"""
+                if val is None:
+                    return Pt(default)
+                try:
+                    return Pt(val.pt) if hasattr(val, 'pt') else Pt(float(val))
+                except (AttributeError, TypeError):
+                    return Pt(default)
+
             ps = ParagraphStyle(
                 'auto_para',
                 parent=styles[base_sn],
                 fontSize=getattr(styles[base_sn], 'fontSize', None) or 10.5,
-                leading=getattr(styles[base_sn], 'leading', None) or (getattr(styles[base_sn], 'fontSize', None) or 10.5) * 1.5,
+                leading=getattr(styles[base_sn], 'leading', None) or (getattr(styles[base_sn], 'fontSize', None) or 10.5) * 1.7,
                 alignment=_rl_align(para.alignment),
-                spaceBefore=Pt(pf.space_before.pt) if pf.space_before else Pt(0),
-                spaceAfter=Pt(pf.space_after.pt) if pf.space_after else Pt(0),
-                leftIndent=Pt(pf.left_indent.pt) if pf.left_indent else Pt(0),
-                rightIndent=Pt(pf.right_indent.pt) if pf.right_indent else Pt(0),
-                firstLineIndent=Pt(pf.first_line_indent.pt) if pf.first_line_indent else Pt(0),
+                spaceBefore=safe_pt(pf.space_before, 0),
+                spaceAfter=safe_pt(pf.space_after, 0),
+                leftIndent=safe_pt(pf.left_indent, 0),
+                rightIndent=safe_pt(pf.right_indent, 0),
+                firstLineIndent=safe_pt(pf.first_line_indent, 0),  # Normal样式已有首行缩进
             )
 
             story.append(Paragraph(full_text, ps))
@@ -223,11 +329,22 @@ def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
             table_data = []
             ncols = len(table.columns)
 
-            for row in table.rows:
+            for row_idx, row in enumerate(table.rows):
                 row_data = []
                 for cell in row.cells:
-                    parts = [p.text.strip() for p in cell.paragraphs if p.text.strip()]
-                    cell_text = '\n'.join(parts) if parts else ' '
+                    # 处理单元格内的段落，保留基本格式
+                    cell_parts = []
+                    for p in cell.paragraphs:
+                        if p.text.strip():
+                            # 尝试保留单元格内文本的粗体等格式
+                            run_texts = []
+                            for run in p.runs:
+                                txt = run.text or ''
+                                if run.bold:
+                                    txt = f'<b>{txt}</b>'
+                                run_texts.append(txt)
+                            cell_parts.append(''.join(run_texts))
+                    cell_text = '<br/>'.join(cell_parts) if cell_parts else ' '
                     row_data.append(Paragraph(cell_text, styles['Normal']))
                 table_data.append(row_data)
 
@@ -240,15 +357,17 @@ def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
                     ('FONTNAME', (0, 0), (-1, -1), cn_font),
                     ('FONTSIZE', (0, 0), (-1, -1), 9),
                     ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                    ('TOPPADDING', (0, 0), (-1, -1), 4),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ('TOPPADDING', (0, 0), (-1, -1), 5),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 4),
                 ]
                 if len(table_data) > 1:
                     cmds.append(('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E8E8E8')))
 
                 t.setStyle(TableStyle(cmds))
                 story.append(t)
-                story.append(Spacer(1, 10))
+                story.append(Spacer(1, 12))
 
     pdf_doc.build(story)
 
@@ -351,12 +470,22 @@ st.set_page_config(page_title="📄 文件合并转PDF", page_icon="📄", layou
 
 def main():
     st.title("📄 文件合并转PDF工具")
+    
+    # 版本显示
+    version_col1, version_col2, version_col3 = st.columns([1, 2, 1])
+    with version_col2:
+        st.markdown(f"<div style='text-align:center; padding:4px 12px; background:#f0f2f6; border-radius:8px; font-size:14px;'>"
+                   f"🏷️ 版本 <b>{__version__}</b> · {__version_date} · "
+                   f"<a href='https://github.com/jrp815/Topdf' target='_blank'>GitHub</a>"
+                   f"</div>", unsafe_allow_html=True)
+    
     st.markdown("保持源文件格式 · 支持 Word/Excel/PDF/图片")
 
     # 侧边栏
     with st.sidebar:
         st.header("📖 使用说明")
-        st.markdown("""
+        st.markdown(f"""**版本：{__version__}**
+
 **支持格式：**
 - 📝 Word：`.doc` `.docx`
 - 📊 Excel：`.xls` `.xlsx`
@@ -370,8 +499,8 @@ def main():
 
 **格式保留：**
 - ✅ 有 LibreOffice 时：**完美保留**
-- ⚠️ 纯 Python 时：保留文字、表格、标题层级、对齐方式
-        """)
+- ⚠️ 纯 Python 时：保留文字、表格、标题层级、对齐方式、**粗体/斜体/下划线**
+""")
         lo_ok, lo_ver = check_libreoffice()
         if lo_ok:
             st.success(f'✅ LibreOffice\n`{lo_ver.split(chr(10))[0]}`')
