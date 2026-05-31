@@ -205,12 +205,13 @@ def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
                 'auto_para',
                 parent=styles[base_sn],
                 fontSize=getattr(styles[base_sn], 'fontSize', None) or 10.5,
+                leading=getattr(styles[base_sn], 'leading', None) or (getattr(styles[base_sn], 'fontSize', None) or 10.5) * 1.5,
                 alignment=_rl_align(para.alignment),
                 spaceBefore=Pt(pf.space_before.pt) if pf.space_before else None,
                 spaceAfter=Pt(pf.space_after.pt) if pf.space_after else None,
-                leftIndent=Pt(pf.left_indent.pt) if pf.left_indent else None,
-                rightIndent=Pt(pf.right_indent.pt) if pf.right_indent else None,
-                firstLineIndent=Pt(pf.first_line_indent.pt) if pf.first_line_indent else None,
+                leftIndent=Pt(pf.left_indent.pt) if pf.left_indent else Pt(0),
+                rightIndent=Pt(pf.right_indent.pt) if pf.right_indent else Pt(0),
+                firstLineIndent=Pt(pf.first_line_indent.pt) if pf.first_line_indent else Pt(0),
             )
 
             story.append(Paragraph(full_text, ps))
