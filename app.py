@@ -69,10 +69,6 @@ def setup_chinese_font():
         if os.path.exists(msyh):
             pdfmetrics.registerFont(TTFont('ChineseFont', msyh, subfontIndex=0))
             pdfmetrics.registerFont(TTFont('ChineseFont-Bold', msyh, subfontIndex=1))
-            pdfmetrics.addMapping('ChineseFont', 0, 0, 'ChineseFont')
-            pdfmetrics.addMapping('ChineseFont', 0, 1, 'ChineseFont')
-            pdfmetrics.addMapping('ChineseFont', 1, 0, 'ChineseFont-Bold')
-            pdfmetrics.addMapping('ChineseFont', 1, 1, 'ChineseFont-Bold')
         else:
             simsun = os.path.join(base, 'Fonts', 'simsun.ttc')
             if os.path.exists(simsun):
@@ -102,10 +98,6 @@ def setup_chinese_font():
             if not found:
                 # 没有常规字体，用SimHei同时作为Regular
                 pdfmetrics.registerFont(TTFont('ChineseFont', EMBEDDED_FONT))
-            pdfmetrics.addMapping('ChineseFont', 0, 0, 'ChineseFont')
-            pdfmetrics.addMapping('ChineseFont', 0, 1, 'ChineseFont')
-            pdfmetrics.addMapping('ChineseFont', 1, 0, 'ChineseFont-Bold')
-            pdfmetrics.addMapping('ChineseFont', 1, 1, 'ChineseFont-Bold')
         else:
             # 连嵌入字体都没有，用纯ASCII
             cn_font = 'Helvetica'
