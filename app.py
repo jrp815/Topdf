@@ -43,8 +43,8 @@ from PIL import Image
 # ============================================================
 # 版本信息
 # ============================================================
-__version__ = "v1.3.0"
-__version_date = "2026-05-31"
+__version__ = "v2.0.0"
+__version_date = "2026-06-01"
 
 
 # ============================================================
@@ -55,33 +55,60 @@ EMBEDDED_FONT = os.path.join(FONT_DIR, 'ChineseFont.ttf')
 
 
 def setup_chinese_font():
-    """注册中文字体，返回 (font_name, styles)"""
+    """注册中文字体，返回 (font_name, styles)。
+    Windows: 微软雅黑(subfontIndex 0=Regular, 1=Bold) + 宋体fallback
+    Linux: 嵌入SimHei作为Bold, 系统字体作为Regular
+    """
     cn_font = 'ChineseFont'
+    system = platform.system()
 
-    if os.path.exists(EMBEDDED_FONT) and os.path.getsize(EMBEDDED_FONT) > 100000:
-        pdfmetrics.registerFont(TTFont(cn_font, EMBEDDED_FONT))
-    else:
-        # Fallback 系统字体
-        system = platform.system()
-        cands = []
-        if system == 'Windows':
-            base = os.environ.get('WINDIR', 'C:\\Windows')
-            cands = [os.path.join(base, 'Fonts', f) for f in ['msyh.ttc', 'simhei.ttf', 'simsun.ttc']]
-        elif system == 'Darwin':
-            cands = ['/System/Library/Fonts/STHeiti Light.ttc']
+    # Windows: 优先微软雅黑TTC(含Regular+Bold)
+    if system == 'Windows':
+        base = os.environ.get('WINDIR', 'C:\\Windows')
+        msyh = os.path.join(base, 'Fonts', 'msyh.ttc')
+        if os.path.exists(msyh):
+            pdfmetrics.registerFont(TTFont('ChineseFont', msyh, subfontIndex=0))
+            pdfmetrics.registerFont(TTFont('ChineseFont-Bold', msyh, subfontIndex=1))
+            pdfmetrics.addMapping('ChineseFont', 0, 0, 'ChineseFont')
+            pdfmetrics.addMapping('ChineseFont', 0, 1, 'ChineseFont')
+            pdfmetrics.addMapping('ChineseFont', 1, 0, 'ChineseFont-Bold')
+            pdfmetrics.addMapping('ChineseFont', 1, 1, 'ChineseFont-Bold')
         else:
-            cands = [
-                '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
-                '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
-            ]
-        for fp in cands:
-            if os.path.exists(fp):
-                try:
-                    kw = {'subfontIndex': 0} if fp.endswith('.ttc') else {}
-                    pdfmetrics.registerFont(TTFont(cn_font, fp, **kw))
-                    break
-                except Exception:
-                    continue
+            simsun = os.path.join(base, 'Fonts', 'simsun.ttc')
+            if os.path.exists(simsun):
+                pdfmetrics.registerFont(TTFont('ChineseFont', simsun, subfontIndex=0))
+    # Linux/Mac: 嵌入SimHei
+    else:
+        if os.path.exists(EMBEDDED_FONT) and os.path.getsize(EMBEDDED_FONT) > 100000:
+            pdfmetrics.registerFont(TTFont('ChineseFont-Bold', EMBEDDED_FONT))
+            # 尝试找系统常规字体
+            sys_fonts = {
+                'Darwin': ['/System/Library/Fonts/STHeiti Light.ttc',
+                           '/System/Library/Fonts/PingFang.ttc'],
+                'Linux': ['/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+                         '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+                         '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'],
+            }
+            found = False
+            for fp in sys_fonts.get(system, []):
+                if os.path.exists(fp):
+                    try:
+                        kw = {'subfontIndex': 0} if fp.endswith('.ttc') else {}
+                        pdfmetrics.registerFont(TTFont('ChineseFont', fp, **kw))
+                        found = True
+                        break
+                    except Exception:
+                        continue
+            if not found:
+                # 没有常规字体，用SimHei同时作为Regular
+                pdfmetrics.registerFont(TTFont('ChineseFont', EMBEDDED_FONT))
+            pdfmetrics.addMapping('ChineseFont', 0, 0, 'ChineseFont')
+            pdfmetrics.addMapping('ChineseFont', 0, 1, 'ChineseFont')
+            pdfmetrics.addMapping('ChineseFont', 1, 0, 'ChineseFont-Bold')
+            pdfmetrics.addMapping('ChineseFont', 1, 1, 'ChineseFont-Bold')
+        else:
+            # 连嵌入字体都没有，用纯ASCII
+            cn_font = 'Helvetica'
 
     styles = getSampleStyleSheet()
 
@@ -205,79 +232,65 @@ def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
 
             # 收集所有 run 的文本和格式 → 构建带格式的 XML 片段
             # ReportLab Paragraph 支持 <b>、<i>、<font>、<color> 等 XML 标签
+            W_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
             parts = []
-            has_formatting = False
             for run in para.runs:
                 text = run.text or ''
-                if not text.strip() and not text:
+                # 保留run中只有空格的文本（不跳过）
+                if not text:
                     continue
                 
-                # 获取 run 格式
                 bold = run.bold
                 italic = run.italic
                 underline = run.underline
                 font_size = None
-                font_name = None
                 color_val = None
                 
                 try:
-                    rpr = run._element.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPr')
+                    rpr = run._element.find(f'.//{W_NS}rPr')
                     if rpr is not None:
-                        # 字体大小
-                        sz = rpr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sz')
-                        if sz is not None and sz.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val'):
-                            font_size = int(sz.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')) / 2  # half-points to points
-                        
-                        # 字体名称
-                        rFonts = rpr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rFonts')
-                        if rFonts is not None:
-                            font_name = rFonts.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii') or \
-                                       rFonts.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia')
-                        
-                        # 颜色
-                        color_elem = rpr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}color')
-                        if color_elem is not None and color_elem.get('{http://schemas.openxmlformats.org/wordprocessingml/2006main}val'):
-                            color_val = color_elem.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+                        sz = rpr.find(f'{W_NS}sz')
+                        if sz is not None and sz.get(f'{W_NS}val'):
+                            font_size = int(sz.get(f'{W_NS}val')) / 2
+                        color_elem = rpr.find(f'{W_NS}color')
+                        if color_elem is not None and color_elem.get(f'{W_NS}val'):
+                            color_val = color_elem.get(f'{W_NS}val')
                 except Exception:
                     pass
                 
-                # 如果有特殊格式，构建 XML 标签
-                formatted = text
-                if bold or italic or underline or font_size or color_val or font_name:
-                    has_formatting = True
-                    
-                    tags_open = []
-                    tags_close = []
-                    
-                    if font_name:
-                        tags_open.append(f'<font face="{cn_font}" name="{cn_font}">')
-                        tags_close.insert(0, '</font>')
-                    
-                    if font_size:
-                        tags_open.append(f'<font size="{font_size}">')
-                        tags_close.insert(0, '</font>')
-                    
-                    if color_val:
-                        tags_open.append(f'<font color="#{color_val}">')
-                        tags_close.insert(0, '</font>')
-                    
-                    if bold:
-                        tags_open.append('<b>')
-                        tags_close.insert(0, '</b>')
-                    
-                    if italic:
-                        tags_open.append('<i>')
-                        tags_close.insert(0, '</i>')
-                    
-                    if underline:
-                        tags_open.append('<u>')
-                        tags_close.insert(0, '</u>')
-                    
-                    formatted = ''.join(tags_open) + text + ''.join(tags_close)
+                # 保留连续空格（ReportLab默认折叠多个空格）
+                text_escaped = text.replace(' ', '\xa0')
                 
+                # 构建XML标签
+                tags_open = []
+                tags_close = []
+                
+                if font_size and font_size != 10.5:
+                    tags_open.append(f'<font size="{font_size}">')
+                    tags_close.insert(0, '</font>')
+                if color_val and color_val.lower() != '000000':
+                    tags_open.append(f'<font color="#{color_val}">')
+                    tags_close.insert(0, '</font>')
+                if bold:
+                    tags_open.append('<b>')
+                    tags_close.insert(0, '</b>')
+                if italic:
+                    tags_open.append('<i>')
+                    tags_close.insert(0, '</i>')
+                if underline:
+                    tags_open.append('<u>')
+                    tags_close.insert(0, '</u>')
+                
+                if tags_open:
+                    formatted = ''.join(tags_open) + text_escaped + ''.join(tags_close)
+                else:
+                    formatted = text_escaped
                 parts.append(formatted)
             
-            full_text = ''.join(parts).strip()
+            # 处理段落内手动换行(\v分隔符)
+            full_text = '<br/>'.join(''.join(parts).split('\v'))
+            # 不要strip，保留前后空格(但去掉首尾换行)
+            full_text = full_text.strip('\n')
             if not full_text:
                 story.append(Spacer(1, 6))
                 continue
@@ -307,17 +320,31 @@ def convert_docx_to_pdf(docx_path, pdf_path, cn_font, styles):
                 except (AttributeError, TypeError):
                     return Pt(default)
 
+            # 行距：Word line_spacing 是 "Exactly"(固定值) 或 "At Least" 或 "Multiple"
+            # ReportLab leading 是行间距(单位pt)
+            base_fs = getattr(styles[base_sn], 'fontSize', None) or 10.5
+            line_leading = base_fs * 1.7  # 默认行距
+            if pf.line_spacing is not None:
+                try:
+                    ls_val = float(pf.line_spacing)
+                    if ls_val > 3:  # 固定值或最小值(pt)
+                        line_leading = ls_val
+                    else:  # 倍数
+                        line_leading = base_fs * ls_val
+                except (TypeError, ValueError):
+                    pass
+
             ps = ParagraphStyle(
                 'auto_para',
                 parent=styles[base_sn],
-                fontSize=getattr(styles[base_sn], 'fontSize', None) or 10.5,
-                leading=getattr(styles[base_sn], 'leading', None) or (getattr(styles[base_sn], 'fontSize', None) or 10.5) * 1.7,
+                fontSize=base_fs,
+                leading=line_leading,
                 alignment=_rl_align(para.alignment),
                 spaceBefore=safe_pt(pf.space_before, 0),
                 spaceAfter=safe_pt(pf.space_after, 0),
                 leftIndent=safe_pt(pf.left_indent, 0),
                 rightIndent=safe_pt(pf.right_indent, 0),
-                firstLineIndent=safe_pt(pf.first_line_indent, 0),  # Normal样式已有首行缩进
+                firstLineIndent=safe_pt(pf.first_line_indent, 0),
             )
 
             story.append(Paragraph(full_text, ps))
